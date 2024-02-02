@@ -3,7 +3,11 @@ import { User } from "../models/user.model.js";
 import { ApiError } from "../utils/ApiError.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
-import uploadOnCloudinary from "../utils/cloudinary.js";
+import {
+    deleteFromCloudinary,
+    uploadOnCloudinary,
+} from "../utils/cloudinary.js";
+import mongoose from "mongoose";
 
 const generateAccessAndRefreshTokens = async (userId) => {
     try {
@@ -59,7 +63,7 @@ const registerUser = asyncHandler(async (req, res) => {
     if (
         req.files &&
         Array.isArray(req.files.coverImage) &&
-        req.files.coverImage.lenght > 0
+        req.files.coverImage.length > 0
     ) {
         coverImageLocalPath = req.files.coverImage[0].path;
     }
@@ -72,6 +76,8 @@ const registerUser = asyncHandler(async (req, res) => {
 
     const avatar = await uploadOnCloudinary(avatarImageLocalPath);
     const coverImage = await uploadOnCloudinary(coverImageLocalPath);
+
+    console.log(coverImage);
 
     if (!avatar) {
         throw new ApiError(400, "Avatar Image is required");
@@ -265,7 +271,7 @@ const getCurrentUser = asyncHandler(async (req, res) => {
 const updateUserDetails = asyncHandler(async (req, res) => {
     const { fullName, email } = req.body;
 
-    if (!fullName || !email) {
+    if (!fullName && !email) {
         throw new ApiError(400, " Atleast one field is required");
     }
 
@@ -288,6 +294,8 @@ const updateUserDetails = asyncHandler(async (req, res) => {
 const updateUserAvatar = asyncHandler(async (req, res) => {
     const avatarLocalPath = req.file?.path;
 
+    // console.log(req.file);
+
     if (!avatarLocalPath) {
         throw new ApiError(400, "Avatar is missing");
     }
@@ -298,8 +306,10 @@ const updateUserAvatar = asyncHandler(async (req, res) => {
         throw new ApiError(400, "Error while uploading on cloudinary");
     }
 
-    const user = User.findByIdAndUpdate(
-        req.user._id,
+    console.log("before");
+
+    const user = await User.findByIdAndUpdate(
+        req.user?._id,
         {
             $set: {
                 avatar: avatar.url,
@@ -307,6 +317,12 @@ const updateUserAvatar = asyncHandler(async (req, res) => {
         },
         { new: true }
     ).select("-password");
+
+    console.log("after");
+
+    // if(user){
+    //     deleteFromCloudinary(avatar.url)
+    // }
 
     return res
         .status(200)
@@ -317,7 +333,7 @@ const updateUserCoverImage = asyncHandler(async (req, res) => {
     const coverImageLocalPath = req.file?.path;
 
     if (!coverImageLocalPath) {
-        throw new ApiError(400, "CoverImage is missing");
+        throw new ApiError(400, "Cover Image is missing");
     }
 
     const coverImage = await uploadOnCloudinary(coverImageLocalPath);
@@ -336,9 +352,140 @@ const updateUserCoverImage = asyncHandler(async (req, res) => {
         { new: true }
     ).select("-password");
 
+    // if(user){
+    //     deleteFromCloudinary(coverImage.url)
+    // }
+
     return res
         .status(200)
         .json(new ApiResponse(200, user, "Cover Image Updated Successfully"));
+});
+
+const getUserChannelProfile = asyncHandler(async (req, res) => {
+    const { username } = req.params;
+
+    if (!username) {
+        throw new ApiError(400, "Username is not provided");
+    }
+
+    const channel = await User.aggregte([
+        {
+            $match: {
+                username: username?.toLowerCase(),
+            },
+        },
+        {
+            $lookup: {
+                from: "subscriptions",
+                localField: "_id",
+                foreignField: "channel",
+                as: "subscribers",
+            },
+        },
+        {
+            $lookup: {
+                from: "subscriptions",
+                localField: "_id",
+                foreignField: "subscriber",
+                as: "subscribedTo",
+            },
+        },
+        {
+            $addFields: {
+                subscribersCount: {
+                    $size: "$subscribers",
+                },
+                channelsSubscribedToCount: {
+                    $size: "$subscribedTo",
+                },
+                isSubscribed: {
+                    $cond: {
+                        if: { $in: [req.user?._id, "$subscribers.subscriber"] },
+                        then: true,
+                        else: false,
+                    },
+                },
+            },
+        },
+        {
+            $project: {
+                fullName: 1,
+                username: 1,
+                email: 1,
+                avatar: 1,
+                subscribersCount: 1,
+                channelsSubscribedToCount: 1,
+                isSubscribed: 1,
+            },
+        },
+    ]);
+
+    if (!channel?.length) {
+        throw new ApiError(404, "Channel does not exist");
+    }
+
+    return res
+        .status(200)
+        .json(
+            new ApiResponse(
+                200,
+                channel[0],
+                "User Channel Data Fetched Successfully"
+            )
+        );
+});
+
+const getWatchHistory = asyncHandler(async (req, res) => {
+    const user = await User.aggregte([
+        {
+            $match: {
+                _id: new mongoose.Types.ObjectId(req.user._id),
+            },
+            $lookup: {
+                from: "videos",
+                localField: "watchHistory",
+                foreignField: "_id",
+                as: "watch_history",
+                pipeline: [
+                    {
+                        $lookup: {
+                            from: "users",
+                            localField: "owner",
+                            foreignField: "_id",
+                            as: "owner",
+                            pipeline: [
+                                {
+                                    $project: {
+                                        fullName: 1,
+                                        username: 1,
+                                        avatar: 1,
+                                    },
+                                },
+                                {
+                                    $addFields:{
+                                        owner:{
+                                            $first:"$owner"
+                                        }
+                                    }
+                                }
+                            ],
+                        },
+                    },
+                ],
+            },
+        },
+    ]);
+
+    if(!user){
+        throw new ApiError(404,"WatchHistory does not exists")
+    }
+
+    return res
+    .status(200)
+    .json(
+        new ApiResponse(200, user[0].watchHistory, "Watch History fetched successfully")
+    )
+
 });
 
 export {
@@ -351,4 +498,6 @@ export {
     updateUserDetails,
     updateUserAvatar,
     updateUserCoverImage,
+    getUserChannelProfile,
+    getWatchHistory,
 };
